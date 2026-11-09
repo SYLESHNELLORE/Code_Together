@@ -1,0 +1,234 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProjectVisibility {
+  PRIVATE
+  INVITE_ONLY
+}
+
+enum ProjectRole {
+  OWNER
+  ADMIN
+  EDITOR
+  VIEWER
+}
+
+enum ExecutionStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  TIMED_OUT
+  CANCELLED
+}
+
+model User {
+  id                  String              @id @default(uuid()) @db.Char(36)
+  username            String              @unique @db.VarChar(40)
+  email               String              @unique @db.VarChar(254)
+  passwordHash        String              @map("password_hash") @db.Text
+  avatarUrl           String?             @map("avatar_url") @db.Text
+  createdAt           DateTime            @default(now()) @map("created_at")
+  updatedAt           DateTime            @updatedAt @map("updated_at")
+  sessions            Session[]
+  ownedProjects       Project[]           @relation("ProjectOwner")
+  memberships         ProjectMember[]
+  sentInvitations     ProjectInvitation[] @relation("InvitationSender")
+  acceptedInvitations ProjectInvitation[] @relation("InvitationAcceptor")
+  messages            ChatMessage[]       @relation("ChatSender")
+  deletedMessages     ChatMessage[]       @relation("ChatModerator")
+  snapshots           DocumentSnapshot[]  @relation("SnapshotCreator")
+  executionJobs       ExecutionJob[]
+
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(uuid()) @db.Char(36)
+  tokenHash String   @unique @map("token_hash") @db.VarChar(191)
+  userId    String   @map("user_id") @db.Char(36)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model Project {
+  id          String              @id @default(uuid()) @db.Char(36)
+  ownerId     String              @map("owner_id") @db.Char(36)
+  name        String              @db.VarChar(80)
+  description String              @default("") @db.VarChar(500)
+  visibility  ProjectVisibility   @default(PRIVATE)
+  createdAt   DateTime            @default(now()) @map("created_at")
+  updatedAt   DateTime            @updatedAt @map("updated_at")
+  owner       User                @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members     ProjectMember[]
+  invitations ProjectInvitation[]
+  files       ProjectFile[]
+  rooms       Room[]
+  executionJobs ExecutionJob[]
+
+  @@index([ownerId, updatedAt])
+  @@map("projects")
+}
+
+model ProjectMember {
+  projectId String      @map("project_id") @db.Char(36)
+  userId    String      @map("user_id") @db.Char(36)
+  role      ProjectRole @default(EDITOR)
+  joinedAt  DateTime    @default(now()) @map("joined_at")
+  project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, userId])
+  @@index([userId, joinedAt])
+  @@map("project_members")
+}
+
+model ProjectInvitation {
+  id           String      @id @default(uuid()) @db.Char(36)
+  projectId    String      @map("project_id") @db.Char(36)
+  invitedById  String      @map("invited_by_id") @db.Char(36)
+  acceptedById String?     @map("accepted_by_id") @db.Char(36)
+  // Optional address lock. When present, only this account can redeem the
+  // token. The address is stored lowercase and is never used as a secret.
+  email        String?     @db.VarChar(254)
+  role         ProjectRole @default(EDITOR)
+  // SHA-256 hex of the 32-byte bearer token. The plaintext token is returned
+  // exactly once, at creation time, and is never persisted or logged.
+  tokenHash    String      @unique @map("token_hash") @db.VarChar(64)
+  expiresAt    DateTime    @map("expires_at")
+  usedAt       DateTime?   @map("used_at")
+  revokedAt    DateTime?   @map("revoked_at")
+  createdAt    DateTime    @default(now()) @map("created_at")
+  project      Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  invitedBy    User        @relation("InvitationSender", fields: [invitedById], references: [id], onDelete: Cascade)
+  acceptedBy   User?       @relation("InvitationAcceptor", fields: [acceptedById], references: [id], onDelete: SetNull)
+
+  @@index([projectId, createdAt])
+  @@index([email, createdAt])
+  @@index([expiresAt])
+  @@map("project_invitations")
+}
+
+model ProjectFile {
+  id        String             @id @default(uuid()) @db.Char(36)
+  projectId String             @map("project_id") @db.Char(36)
+  parentId  String?            @map("parent_id") @db.Char(36)
+  name      String             @db.VarChar(255)
+  // 700 keeps the (projectId, path) unique index under InnoDB's 3072-byte
+  // key limit with utf8mb4 (36 * 4 + 700 * 4 bytes).
+  path      String             @db.VarChar(700)
+  isFolder  Boolean            @default(false) @map("is_folder")
+  language  String             @default("plaintext") @db.VarChar(40)
+  // LONGTEXT because source files can exceed MySQL TEXT's 64 KiB limit.
+  content   String             @db.LongText
+  createdAt DateTime           @default(now()) @map("created_at")
+  updatedAt DateTime           @updatedAt @map("updated_at")
+  project   Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parent    ProjectFile?       @relation("FileTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children  ProjectFile[]      @relation("FileTree")
+  snapshots DocumentSnapshot[]
+  executionJobs ExecutionJob[]
+
+  @@unique([projectId, path])
+  @@index([projectId, parentId])
+  @@map("project_files")
+}
+
+model Room {
+  id          String        @id @default(uuid()) @db.Char(36)
+  projectId   String        @map("project_id") @db.Char(36)
+  createdById String        @map("created_by_id") @db.Char(36)
+  inviteHash  String?       @unique @map("invite_hash") @db.VarChar(191)
+  expiresAt   DateTime?     @map("expires_at")
+  createdAt   DateTime      @default(now()) @map("created_at")
+  project     Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  messages    ChatMessage[]
+
+  // One canonical chat room per project. The unique constraint also makes the
+  // lazy get-or-create path race-safe.
+  @@unique([projectId])
+  @@map("rooms")
+}
+
+model ChatMessage {
+  id              String    @id @default(uuid()) @db.Char(36)
+  roomId          String    @map("room_id") @db.Char(36)
+  senderId        String    @map("sender_id") @db.Char(36)
+  // Client-generated idempotency key so a retried send after a reconnect
+  // creates at most one row. NULL is allowed for non-deduplicated clients.
+  clientMessageId String?   @map("client_message_id") @db.VarChar(64)
+  content         String    @db.VarChar(4000)
+  // Soft deletion keeps an audit trail: the row, author and moderator remain
+  // available to the database while the API hides the content.
+  deletedAt       DateTime? @map("deleted_at")
+  deletedById     String?   @map("deleted_by_id") @db.Char(36)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  room            Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  sender          User      @relation("ChatSender", fields: [senderId], references: [id], onDelete: Cascade)
+  deletedBy       User?     @relation("ChatModerator", fields: [deletedById], references: [id], onDelete: SetNull)
+
+  @@unique([roomId, clientMessageId])
+  @@index([roomId, createdAt])
+  @@index([deletedById])
+  @@map("chat_messages")
+}
+
+model DocumentSnapshot {
+  id            String      @id @default(uuid()) @db.Char(36)
+  projectFileId String      @map("project_file_id") @db.Char(36)
+  version       Int
+  state         Bytes       @db.LongBlob
+  createdById   String?     @map("created_by_id") @db.Char(36)
+  createdAt     DateTime    @default(now()) @map("created_at")
+  projectFile   ProjectFile @relation(fields: [projectFileId], references: [id], onDelete: Cascade)
+  createdBy     User?       @relation("SnapshotCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@unique([projectFileId, version])
+  @@index([projectFileId, createdAt])
+  @@map("document_snapshots")
+}
+
+model ExecutionJob {
+  id              String          @id @default(uuid()) @db.Char(36)
+  projectId       String          @map("project_id") @db.Char(36)
+  fileId          String?         @map("file_id") @db.Char(36)
+  userId          String          @map("user_id") @db.Char(36)
+  language        String          @db.VarChar(40)
+  status          ExecutionStatus @default(QUEUED)
+  // Non-null only while the job is queued/running. The unique index enforces
+  // one active execution per user per project across API instances.
+  activeKey       String?         @unique @map("active_key") @db.VarChar(80)
+  exitCode        Int?            @map("exit_code")
+  signal          String?         @db.VarChar(32)
+  timedOut        Boolean         @default(false) @map("timed_out")
+  cancelled       Boolean         @default(false)
+  outputTruncated Boolean         @default(false) @map("output_truncated")
+  // Bounded previews; the full stream is never persisted.
+  stdout          String          @default("") @db.Text
+  stderr          String          @default("") @db.Text
+  errorCode       String?         @map("error_code") @db.VarChar(64)
+  errorMessage    String?         @map("error_message") @db.VarChar(500)
+  durationMs      Int?            @map("duration_ms")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  startedAt       DateTime?       @map("started_at")
+  completedAt     DateTime?       @map("completed_at")
+  project         Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  file            ProjectFile?    @relation(fields: [fileId], references: [id], onDelete: SetNull)
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+  @@index([userId, createdAt])
+  @@index([status])
+  @@map("execution_jobs")
+}
