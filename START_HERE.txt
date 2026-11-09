@@ -1,0 +1,16 @@
+CODETOGETHER START HERE
+
+1. Install Node.js 20+ and MySQL 8.
+2. Open a terminal in this folder.
+3. Run: npm install
+4. Copy server/.env.example to server/.env and update DATABASE_URL.
+5. Run: npm run db:generate
+6. Run: npm run db:migrate
+7. Run: npm run dev
+
+Open http://localhost:5173
+
+Note: The UI is a functional foundation preview. Authentication, MySQL-backed API persistence,
+project teams and invitations, and project roles are implemented. Yjs real-time document
+synchronization and secure code execution are later phases.
+Do not expose the starter endpoints publicly before reviewing the security notes in README.md.
