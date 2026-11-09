@@ -1,0 +1,113 @@
+#!/bin/sh
+# Trusted entrypoint for the CodeTogether execution sandbox.
+#
+# Contract:
+#   run-code <language> <entry-file>
+#   user source is read from stdin and written to a fixed name under /tmp
+#
+# The host never mounts a directory into this container, and no environment
+# variable from the API process is forwarded. The server validates the language
+# and entry name, and this script validates them again before executing.
+set -eu
+
+if [ "$#" -ne 2 ]; then
+  echo "usage: run-code <language> <entry-file>" >&2
+  exit 64
+fi
+
+language=$1
+entry=$2
+
+case "$language" in
+  python)
+    [ "$entry" = "main.py" ] || { echo "invalid entry file" >&2; exit 64; }
+    runner="python"
+    ;;
+  javascript)
+    [ "$entry" = "main.js" ] || { echo "invalid entry file" >&2; exit 64; }
+    runner="javascript"
+    ;;
+  typescript)
+    case "$entry" in
+      main.ts|main.tsx) ;;
+      *) echo "invalid entry file" >&2; exit 64 ;;
+    esac
+    runner="typescript"
+    ;;
+  c)
+    [ "$entry" = "main.c" ] || { echo "invalid entry file" >&2; exit 64; }
+    runner="c"
+    ;;
+  cpp)
+    [ "$entry" = "main.cpp" ] || { echo "invalid entry file" >&2; exit 64; }
+    runner="cpp"
+    ;;
+  java)
+    [ "$entry" = "main.java" ] || { echo "invalid entry file" >&2; exit 64; }
+    runner="java"
+    ;;
+  *)
+    echo "unsupported language" >&2
+    exit 64
+    ;;
+esac
+
+# The API enforces a smaller limit. This is defense in depth if the wrapper is
+# ever invoked directly on the host or by a future caller.
+limit=200000
+source_file="/tmp/source-$$"
+trap 'rm -f "$source_file" "/work/program-$$"' EXIT INT TERM
+
+head -c $((limit + 1)) > "$source_file"
+size=$(wc -c < "$source_file")
+if [ "$size" -gt "$limit" ]; then
+  echo "source exceeds the sandbox input limit" >&2
+  exit 65
+fi
+
+# Fixed working directory on the writable tmpfs. The base filesystem is
+# read-only, so every writable path must stay below /tmp or /work. Only /work
+# is mounted executable: C and C++ binaries are written there, while all other
+# temporary files stay on the noexec /tmp mount.
+cd /tmp
+export HOME=/tmp
+export TMPDIR=/tmp
+# Keep npm/tsx/esbuild from attempting to write outside the tmpfs.
+export TSX_DISABLE_CACHE=1
+
+case "$runner" in
+  python)
+    mv "$source_file" "main.py"
+    exec python3 -I -B main.py
+    ;;
+  javascript)
+    mv "$source_file" "main.js"
+    exec node main.js
+    ;;
+  typescript)
+    mv "$source_file" "$entry"
+    exec tsx "$entry"
+    ;;
+  c|cpp)
+    if [ "$runner" = "c" ]; then
+      compiler="gcc"
+      standard="-std=c17"
+      mv "$source_file" "main.c"
+      input="main.c"
+    else
+      compiler="g++"
+      standard="-std=c++17"
+      mv "$source_file" "main.cpp"
+      input="main.cpp"
+    fi
+    "$compiler" -O1 -pipe -fno-diagnostics-color "$standard" -o "/work/program-$$" "$input"
+    exec "/work/program-$$"
+    ;;
+  java)
+    # JEP 330 single-file launcher: compiles to memory and runs the first
+    # top-level class, so the entry name never has to match a public class
+    # name and no .class files are written to disk.
+    mv "$source_file" "$entry"
+    exec java "$entry"
+    ;;
+esac
